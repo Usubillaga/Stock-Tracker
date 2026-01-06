@@ -15,6 +15,7 @@ st.markdown("""
 **New Capabilities:**
 * **Volume Analysis:** Detects buying pressure (Volume Spikes).
 * **Multi-Market:** Scans S&P 500, Russell 2000 (Small Caps), FTSE (London), and DAX (Germany).
+* **Extended Range:** Scan up to 150 stocks at a time.
 """)
 
 # --- Sidebar: User Inputs ---
@@ -25,7 +26,8 @@ market_choice = st.sidebar.selectbox(
 )
 
 st.sidebar.header("2. Scanner Settings")
-batch_size = st.sidebar.slider("Stocks to Scan", 10, 50, 20, 5)
+# INCREASED LIMIT TO 150
+batch_size = st.sidebar.slider("Stocks to Scan", 10, 150, 50, 10)
 pe_threshold = st.sidebar.number_input("Max P/E Ratio", value=50, step=5)
 peg_threshold = st.sidebar.slider("Max PEG Ratio", 0.5, 5.0, 1.5, 0.1)
 
@@ -54,14 +56,12 @@ def get_tickers(market_name):
             
         elif "FTSE" in market_name: # London Stock Exchange
             url = 'https://en.wikipedia.org/wiki/FTSE_100_Index'
-            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[4] # Index 4 usually holds the table
-            # Append .L for Yahoo Finance (e.g., SHEL.L)
+            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[4] 
             tickers = [t + ".L" for t in df['Ticker'].tolist()]
             
         elif "DAX" in market_name: # Germany
             url = 'https://en.wikipedia.org/wiki/DAX'
             df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[4]
-            # Append .DE for Xetra
             tickers = [t + ".DE" for t in df['Ticker'].tolist()]
             
     except Exception as e:
@@ -74,13 +74,16 @@ def get_tickers(market_name):
 def fetch_fundamentals(ticker_list):
     data = []
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
     for i, ticker_symbol in enumerate(ticker_list):
+        status_text.text(f"Scanning {i+1}/{len(ticker_list)}: {ticker_symbol}...")
         try:
             stock = yf.Ticker(ticker_symbol)
             info = stock.info
             
             # Extract Data
+            company_name = info.get('longName', info.get('shortName', ticker_symbol))
             current_price = info.get('currentPrice', 0)
             target_price = info.get('targetMeanPrice', current_price)
             pe_ratio = info.get('trailingPE')
@@ -106,17 +109,18 @@ def fetch_fundamentals(ticker_list):
             else:
                 upside = 0
             
-            # Volume Spike Metric (Current Vol / Avg Vol)
+            # Volume Spike Metric
             vol_spike = (current_volume / avg_volume) if avg_volume and avg_volume > 0 else 1.0
 
             if current_price > 0:
                 data.append({
                     'Symbol': ticker_symbol,
+                    'Name': company_name, # Added Name Column
                     'Price': current_price,
                     'P/E': round(pe_ratio, 2),
                     'PEG': round(peg_ratio, 2),
                     'Upside (%)': round(upside, 2),
-                    'Vol Spike': round(vol_spike, 2), # > 1.5 means high buying pressure
+                    'Vol Spike': round(vol_spike, 2), 
                     'Sector': info.get('sector', 'N/A')
                 })
                 
@@ -124,6 +128,7 @@ def fetch_fundamentals(ticker_list):
             continue
         progress_bar.progress((i + 1) / len(ticker_list))
         
+    status_text.empty()
     progress_bar.empty()
     return pd.DataFrame(data)
 
@@ -180,12 +185,18 @@ with tab1:
                 if not matches.empty:
                     st.success(f"Found {len(matches)} stocks!")
                     
-                    # Highlight high volume spikes
+                    # Display Table with Names
                     st.dataframe(
                         matches.set_index('Symbol').style
-                        .format({'Price': "{:.2f}", 'P/E': "{:.2f}", 'PEG': "{:.2f}", 'Upside (%)': "{:.2f}", 'Vol Spike': "{:.2f}"})
+                        .format({
+                            'Price': "{:.2f}", 
+                            'P/E': "{:.2f}", 
+                            'PEG': "{:.2f}", 
+                            'Upside (%)': "{:.2f}", 
+                            'Vol Spike': "{:.2f}"
+                        })
                         .background_gradient(subset=['Upside (%)'], cmap='Greens')
-                        .background_gradient(subset=['Vol Spike'], cmap='Blues'), # Blue for high volume
+                        .background_gradient(subset=['Vol Spike'], cmap='Blues'),
                         use_container_width=True
                     )
                     st.session_state['valid_tickers'] = matches['Symbol'].tolist()
