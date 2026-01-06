@@ -8,198 +8,200 @@ import requests
 from io import StringIO
 
 # --- Page Config ---
-st.set_page_config(page_title="Random Market Scanner", layout="wide")
+st.set_page_config(page_title="Pro Market Scanner", layout="wide")
 
-st.title("🎲 Random Market Scanner (NYSE/NASDAQ)")
+st.title("🌍 Pro Market Scanner (US, UK & Europe)")
 st.markdown("""
-**New Features:**
-* **Dynamic Scanning:** Fetches the full S&P 500 list and picks a random batch every time.
-* **Manual PEG Calc:** Calculates PEG manually if the data source is missing it.
+**New Capabilities:**
+* **Volume Analysis:** Detects buying pressure (Volume Spikes).
+* **Multi-Market:** Scans S&P 500, Russell 2000 (Small Caps), FTSE (London), and DAX (Germany).
 """)
 
 # --- Sidebar: User Inputs ---
-st.sidebar.header("1. Scanner Settings")
-batch_size = st.sidebar.slider("Number of Random Stocks to Scan", 10, 100, 30, 5)
+st.sidebar.header("1. Market Selection")
+market_choice = st.sidebar.selectbox(
+    "Select Market / Index:",
+    ["S&P 500 (US Large Cap)", "S&P 600 (US Small Cap/Russell Proxy)", "FTSE 100 (UK/London)", "DAX 40 (Germany)"]
+)
+
+st.sidebar.header("2. Scanner Settings")
+batch_size = st.sidebar.slider("Stocks to Scan", 10, 50, 20, 5)
 pe_threshold = st.sidebar.number_input("Max P/E Ratio", value=50, step=5)
 peg_threshold = st.sidebar.slider("Max PEG Ratio", 0.5, 5.0, 1.5, 0.1)
 
 st.sidebar.markdown("---")
-st.sidebar.header("2. Analysis Criteria")
+st.sidebar.header("3. Criteria")
 upside_threshold = st.sidebar.slider("Min Analyst Upside (%)", 0, 50, 5, 5)
 
 # --- Helper Functions ---
 
-@st.cache_data(ttl=3600*24) # Cache the S&P 500 list for 24 hours
-def get_sp500_tickers():
+@st.cache_data(ttl=3600*12)
+def get_tickers(market_name):
+    """Scrapes Wikipedia for ticker lists based on the selected market."""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    tickers = []
+    
     try:
-        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        # Pretend to be a browser to avoid 403 Forbidden error
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        
-        response = requests.get(url, headers=headers)
-        
-        # Read the HTML content using StringIO
-        tables = pd.read_html(StringIO(response.text))
-        df = tables[0]
-        
-        return df['Symbol'].tolist()
+        if "S&P 500" in market_name:
+            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[0]
+            tickers = df['Symbol'].tolist()
+            
+        elif "S&P 600" in market_name: # Proxy for Russell 2000 (Small Caps)
+            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_600_companies'
+            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[0]
+            tickers = df['Symbol'].tolist()
+            
+        elif "FTSE" in market_name: # London Stock Exchange
+            url = 'https://en.wikipedia.org/wiki/FTSE_100_Index'
+            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[4] # Index 4 usually holds the table
+            # Append .L for Yahoo Finance (e.g., SHEL.L)
+            tickers = [t + ".L" for t in df['Ticker'].tolist()]
+            
+        elif "DAX" in market_name: # Germany
+            url = 'https://en.wikipedia.org/wiki/DAX'
+            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[4]
+            # Append .DE for Xetra
+            tickers = [t + ".DE" for t in df['Ticker'].tolist()]
+            
     except Exception as e:
-        st.error(f"Error fetching ticker list: {e}")
-        # Fallback list if Wikipedia fails completely
-        return ["GOOGL", "AMZN", "MSFT", "AAPL", "NVDA", "TSLA", "META", "AMD", "PLTR", "SOFI", "INTC"]
+        st.error(f"Could not load tickers for {market_name}. Using fallback list. Error: {e}")
+        return ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"]
+
+    # Clean tickers (Change BRK.B to BRK-B for US stocks)
+    return [t.replace('.', '-') if "S&P" in market_name else t for t in tickers]
 
 def fetch_fundamentals(ticker_list):
     data = []
-    
-    # Progress bar
     progress_bar = st.progress(0)
-    status_text = st.empty()
     
     for i, ticker_symbol in enumerate(ticker_list):
-        status_text.text(f"Analyzing {ticker_symbol}...")
         try:
-            # Clean ticker (replace . with - for BRK.B)
-            ticker_symbol = ticker_symbol.replace('.', '-')
             stock = yf.Ticker(ticker_symbol)
             info = stock.info
             
-            # --- Data Extraction ---
+            # Extract Data
             current_price = info.get('currentPrice', 0)
             target_price = info.get('targetMeanPrice', current_price)
             pe_ratio = info.get('trailingPE')
-            
-            # Handle Missing Growth Data for PEG Calc
-            earnings_growth = info.get('earningsGrowth', None) # Returned as decimal (0.15 = 15%)
+            earnings_growth = info.get('earningsGrowth', None)
             peg_ratio = info.get('pegRatio', None)
-            
-            # --- 1. Fix PEG Calculation ---
-            # If PEG is missing but we have P/E and Growth, calculate it manually
+            avg_volume = info.get('averageVolume', 0)
+            current_volume = info.get('volume', 0)
+
+            # Manual PEG Calculation
             if peg_ratio is None and pe_ratio is not None and earnings_growth is not None:
                 if earnings_growth > 0:
                     peg_ratio = pe_ratio / (earnings_growth * 100)
                 else:
-                    peg_ratio = 999 # Negative growth = Bad PEG
+                    peg_ratio = 999
             
-            # If still None, set to default high value to fail filter
-            if peg_ratio is None:
-                peg_ratio = 999 
-                
-            if pe_ratio is None:
-                pe_ratio = 999
+            # Fill Defaults
+            if peg_ratio is None: peg_ratio = 999
+            if pe_ratio is None: pe_ratio = 999
 
-            # --- 2. Calculate Upside ---
+            # Upside Calc
             if current_price and current_price > 0:
                 upside = ((target_price - current_price) / current_price) * 100
             else:
                 upside = 0
             
-            # Only add if data is valid (Price > 0)
+            # Volume Spike Metric (Current Vol / Avg Vol)
+            vol_spike = (current_volume / avg_volume) if avg_volume and avg_volume > 0 else 1.0
+
             if current_price > 0:
                 data.append({
                     'Symbol': ticker_symbol,
                     'Price': current_price,
                     'P/E': round(pe_ratio, 2),
                     'PEG': round(peg_ratio, 2),
-                    'Growth (%)': round(earnings_growth * 100, 2) if earnings_growth else 0,
                     'Upside (%)': round(upside, 2),
+                    'Vol Spike': round(vol_spike, 2), # > 1.5 means high buying pressure
                     'Sector': info.get('sector', 'N/A')
                 })
                 
         except Exception:
             continue
-            
         progress_bar.progress((i + 1) / len(ticker_list))
         
-    status_text.empty()
     progress_bar.empty()
     return pd.DataFrame(data)
 
 def calculate_technicals(df):
+    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # Moving Averages
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    
+    # Volume MA (20 day)
+    df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
+    
     return df
 
 # --- Main Tabs ---
-tab1, tab2 = st.tabs(["🎲 Random Scanner", "📈 Technical Deep Dive"])
+tab1, tab2 = st.tabs(["🎲 Market Scanner", "📊 Deep Dive (Vol & Charts)"])
 
-# --- TAB 1: RANDOM SCANNER ---
+# --- TAB 1: SCANNER ---
 with tab1:
     col1, col2 = st.columns([1, 2])
     with col1:
-        # Button to trigger new batch
-        if st.button('🎲 Shuffle & Scan New Batch', type="primary"):
+        if st.button('🎲 Shuffle & Scan', type="primary"):
             st.session_state['scan_run'] = True
-            
-            # Fetch full list and pick random sample
-            all_tickers = get_sp500_tickers()
-            random_batch = random.sample(all_tickers, min(batch_size, len(all_tickers)))
-            st.session_state['current_batch'] = random_batch
+            all_tickers = get_tickers(market_choice)
+            # Safe sample handling
+            sample_size = min(batch_size, len(all_tickers))
+            st.session_state['current_batch'] = random.sample(all_tickers, sample_size)
     
     with col2:
-        st.info("Click the button to pick a random set of stocks from the S&P 500 and analyze them.")
+        st.info(f"Scanning a random sample of **{batch_size}** stocks from **{market_choice}**.")
 
-    # Logic to run the scan
     if st.session_state.get('scan_run') and st.session_state.get('current_batch'):
-        
-        with st.spinner(f"Scanning {len(st.session_state['current_batch'])} random stocks..."):
+        with st.spinner("Fetching Data..."):
             df_fund = fetch_fundamentals(st.session_state['current_batch'])
             
             if not df_fund.empty:
-                # Filter Logic
                 matches = df_fund[
                     (df_fund['PEG'] < peg_threshold) & 
-                    (df_fund['PEG'] > 0) &
                     (df_fund['P/E'] < pe_threshold) &
                     (df_fund['Upside (%)'] >= upside_threshold)
                 ]
                 
                 # Metrics
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Batch Size", len(df_fund))
-                m2.metric("Gems Found", len(matches))
-                if not df_fund['PEG'].empty:
-                     m3.metric("Avg PEG (Batch)", f"{df_fund['PEG'].median():.2f}")
-                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Scanned", len(df_fund))
+                c2.metric("Opportunities", len(matches))
+                c3.metric("Avg Upside", f"{df_fund['Upside (%)'].mean():.1f}%")
+
                 if not matches.empty:
-                    st.success(f"Found {len(matches)} Undervalued Growth stocks!")
+                    st.success(f"Found {len(matches)} stocks!")
                     
-                    # --- FIXED: Specific Column Formatting ---
-                    # We format specific columns to avoid errors with the 'Sector' text column
+                    # Highlight high volume spikes
                     st.dataframe(
                         matches.set_index('Symbol').style
-                        .format({
-                            'Price': "{:.2f}", 
-                            'P/E': "{:.2f}", 
-                            'PEG': "{:.2f}", 
-                            'Growth (%)': "{:.2f}", 
-                            'Upside (%)': "{:.2f}"
-                        })
-                        .background_gradient(subset=['Upside (%)'], cmap='Greens'),
+                        .format({'Price': "{:.2f}", 'P/E': "{:.2f}", 'PEG': "{:.2f}", 'Upside (%)': "{:.2f}", 'Vol Spike': "{:.2f}"})
+                        .background_gradient(subset=['Upside (%)'], cmap='Greens')
+                        .background_gradient(subset=['Vol Spike'], cmap='Blues'), # Blue for high volume
                         use_container_width=True
                     )
-                    
-                    # Store matches for Tab 2
                     st.session_state['valid_tickers'] = matches['Symbol'].tolist()
                 else:
-                    st.warning("No matches found in this random batch. Try clicking 'Shuffle' again!")
-                    st.session_state['valid_tickers'] = df_fund['Symbol'].tolist() # Fallback to all scanned
+                    st.warning("No perfect matches. Showing all scanned data below.")
+                    st.session_state['valid_tickers'] = df_fund['Symbol'].tolist()
                 
-                with st.expander("View Full Batch Data"):
+                with st.expander("Raw Data"):
                     st.dataframe(df_fund)
-            else:
-                st.error("Failed to fetch data. Check your internet connection.")
 
-# --- TAB 2: TECHNICAL ANALYSIS ---
+# --- TAB 2: TECHNICAL DEEP DIVE ---
 with tab2:
-    st.subheader("Technical Analysis")
+    st.subheader("Technical & Volume Analysis")
     
-    # Get tickers from session state or default
-    available_tickers = st.session_state.get('valid_tickers', ["AAPL", "MSFT", "GOOGL"])
-    selected_ticker = st.selectbox("Select a Stock:", available_tickers)
+    available_tickers = st.session_state.get('valid_tickers', ["AAPL", "MSFT"])
+    selected_ticker = st.selectbox("Select Stock:", available_tickers)
     
     if selected_ticker and st.button("Analyze Charts"):
         stock = yf.Ticker(selected_ticker)
@@ -209,48 +211,45 @@ with tab2:
             df_hist = calculate_technicals(df_hist)
             latest = df_hist.iloc[-1]
             
-            # Simple Chart
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_width=[0.2, 0.7])
+            # --- 3-Row Chart (Price, Volume, RSI) ---
+            fig = make_subplots(
+                rows=3, cols=1, 
+                shared_xaxes=True, 
+                vertical_spacing=0.05,
+                row_heights=[0.5, 0.25, 0.25],
+                subplot_titles=(f'{selected_ticker} Price', 'Volume Analysis', 'RSI (Momentum)')
+            )
+
+            # 1. Price & SMA
             fig.add_trace(go.Candlestick(x=df_hist.index, open=df_hist['Open'], high=df_hist['High'], low=df_hist['Low'], close=df_hist['Close'], name='OHLC'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_hist.index, y=df_hist['SMA_50'], line=dict(color='orange'), name='50 SMA'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_hist.index, y=df_hist['RSI'], line=dict(color='purple'), name='RSI'), row=2, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-            fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-            fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
-            
+
+            # 2. Volume Bar Chart
+            colors = ['green' if c >= o else 'red' for c, o in zip(df_hist['Close'], df_hist['Open'])]
+            fig.add_trace(go.Bar(x=df_hist.index, y=df_hist['Volume'], marker_color=colors, name='Volume'), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_hist.index, y=df_hist['Vol_SMA_20'], line=dict(color='blue', width=1), name='Vol SMA (20)'), row=2, col=1)
+
+            # 3. RSI
+            fig.add_trace(go.Scatter(x=df_hist.index, y=df_hist['RSI'], line=dict(color='purple'), name='RSI'), row=3, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+            fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
+
+            fig.update_layout(height=800, template="plotly_dark", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
             
-            # Insights
-            st.write(f"**RSI:** {latest['RSI']:.2f}")
-            if latest['RSI'] < 30: st.success("✅ OVERSOLD - Potential Buy Signal")
-            elif latest['RSI'] > 70: st.error("❌ OVERBOUGHT - Potential Sell Signal")
-            else: st.info("Neutral Zone")
+            # --- Analysis Text ---
+            vol_status = "High" if latest['Volume'] > latest['Vol_SMA_20'] else "Normal"
+            st.info(f"""
+            **Volume Analysis:**
+            * **Volume Today:** {latest['Volume']:,} (vs Avg: {int(latest['Vol_SMA_20']):,})
+            * **Status:** {vol_status} Activity. (High volume on Green days = Bullish).
+            """)
 
-# --- FOOTER: USER GUIDE ---
+# --- User Guide ---
 st.markdown("---")
-with st.expander("📖 User Guide & Methodology (Click to Open)"):
+with st.expander("📖 Guide: Volume & New Markets"):
     st.markdown("""
-    ### **How to Use This Tracker**
-    
-    #### **1. Configure Your Strategy (Sidebar)**
-    * **Batch Size:** Choose how many stocks (10-100) to pull randomly from the S&P 500.
-    * **Max PEG Ratio:** The most important filter. A PEG < 1.0 implies the stock is undervalued relative to its growth rate.
-    * **Min Analyst Upside:** Filters stocks where the Wall St. consensus target is higher than the current price.
-
-    #### **2. Scan for Value (Tab 1)**
-    * Click **Shuffle & Scan New Batch**.
-    * Look for rows highlighted in Green. These are your candidates.
-    * *Note:* If the list is empty, try increasing the PEG threshold (e.g., to 1.5).
-
-    #### **3. Check the Charts (Tab 2)**
-    * Select a stock from the dropdown.
-    * **RSI Indicator:**
-        * **< 30 (Green Line):** Oversold. Price may be due for a bounce. (Potential Buy)
-        * **> 70 (Red Line):** Overbought. Price may be due for a drop. (Wait)
-    * **Trend (SMA 50):** * If the candles are **above** the Orange Line, the trend is UP.
-    
-    #### **Methodology**
-    * **Data Source:** Yahoo Finance (Real-time delayed).
-    * **RSI Formula:** 14-period Relative Strength Index.
-    * **Upside:** Calculated as `(Analyst Target - Current Price) / Current Price`.
+    * **Markets:** Switch between **S&P 500** (Large Cap), **S&P 600** (Small Cap/Russell proxy), **FTSE** (UK), and **DAX** (Germany) in the sidebar.
+    * **Vol Spike:** This metric in the table shows if trading volume is higher than usual. A value > 1.5 means volume is 50% higher than average (Institutional interest).
+    * **Charts:** The Deep Dive now includes a Volume Bar chart. Look for tall Green bars (buying pressure).
     """)
