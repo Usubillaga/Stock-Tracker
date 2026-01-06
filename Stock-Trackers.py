@@ -26,7 +26,6 @@ market_choice = st.sidebar.selectbox(
 )
 
 st.sidebar.header("2. Scanner Settings")
-# INCREASED LIMIT TO 150
 batch_size = st.sidebar.slider("Stocks to Scan", 10, 150, 50, 10)
 pe_threshold = st.sidebar.number_input("Max P/E Ratio", value=50, step=5)
 peg_threshold = st.sidebar.slider("Max PEG Ratio", 0.5, 5.0, 1.5, 0.1)
@@ -39,37 +38,71 @@ upside_threshold = st.sidebar.slider("Min Analyst Upside (%)", 0, 50, 5, 5)
 
 @st.cache_data(ttl=3600*12)
 def get_tickers(market_name):
-    """Scrapes Wikipedia for ticker lists based on the selected market."""
+    """Smartly scrapes Wikipedia by searching for the correct column names."""
     headers = {'User-Agent': 'Mozilla/5.0'}
     tickers = []
     
+    # Define URL and possible column names for each market
+    if "S&P 500" in market_name:
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        target_cols = ['Symbol', 'Ticker']
+        suffix = ""
+    elif "S&P 600" in market_name:
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_600_companies'
+        target_cols = ['Symbol', 'Ticker']
+        suffix = ""
+    elif "FTSE" in market_name:
+        url = 'https://en.wikipedia.org/wiki/FTSE_100_Index'
+        target_cols = ['EPIC', 'Ticker', 'Symbol'] # FTSE often uses 'EPIC'
+        suffix = ".L"
+    elif "DAX" in market_name:
+        url = 'https://en.wikipedia.org/wiki/DAX'
+        target_cols = ['Ticker', 'Symbol', 'Ticker symbol']
+        suffix = ".DE"
+    
     try:
-        if "S&P 500" in market_name:
-            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[0]
-            tickers = df['Symbol'].tolist()
+        response = requests.get(url, headers=headers)
+        tables = pd.read_html(StringIO(response.text))
+        
+        # SMART SEARCH: Loop through all tables to find one with the right column
+        found_df = None
+        found_col = None
+        
+        for df in tables:
+            # Check if any of our target columns exist in this table
+            for col in target_cols:
+                if col in df.columns:
+                    found_df = df
+                    found_col = col
+                    break
+            if found_df is not None:
+                break
+        
+        if found_df is not None:
+            raw_tickers = found_df[found_col].tolist()
+            # Clean and append suffix
+            tickers = []
+            for t in raw_tickers:
+                # Basic cleaning (some wikis have footnotes like 'SAP[1]')
+                clean_t = str(t).split('[')[0].strip()
+                
+                # Apply Market Specific Fixes
+                if "S&P" in market_name:
+                    clean_t = clean_t.replace('.', '-') # BRK.B -> BRK-B
+                
+                tickers.append(clean_t + suffix)
+            return tickers
             
-        elif "S&P 600" in market_name: # Proxy for Russell 2000 (Small Caps)
-            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_600_companies'
-            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[0]
-            tickers = df['Symbol'].tolist()
-            
-        elif "FTSE" in market_name: # London Stock Exchange
-            url = 'https://en.wikipedia.org/wiki/FTSE_100_Index'
-            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[4] 
-            tickers = [t + ".L" for t in df['Ticker'].tolist()]
-            
-        elif "DAX" in market_name: # Germany
-            url = 'https://en.wikipedia.org/wiki/DAX'
-            df = pd.read_html(StringIO(requests.get(url, headers=headers).text))[4]
-            tickers = [t + ".DE" for t in df['Ticker'].tolist()]
-            
-    except Exception as e:
-        st.error(f"Could not load tickers for {market_name}. Using fallback list. Error: {e}")
-        return ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"]
+        else:
+            st.error(f"Could not find a table with columns {target_cols} on Wikipedia page.")
+            raise ValueError("Table not found")
 
-    # Clean tickers (Change BRK.B to BRK-B for US stocks)
-    return [t.replace('.', '-') if "S&P" in market_name else t for t in tickers]
+    except Exception as e:
+        st.error(f"Error scraping {market_name}: {e}. Using fallback list.")
+        # Fallback Lists if Wikipedia Fails
+        if "FTSE" in market_name: return ["SHEL.L", "BP.L", "HSBA.L", "ULVR.L", "AZN.L", "GSK.L", "RIO.L"]
+        if "DAX" in market_name: return ["SAP.DE", "SIE.DE", "ALV.DE", "DTE.DE", "VOW3.DE", "BMW.DE"]
+        return ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"]
 
 def fetch_fundamentals(ticker_list):
     data = []
@@ -115,7 +148,7 @@ def fetch_fundamentals(ticker_list):
             if current_price > 0:
                 data.append({
                     'Symbol': ticker_symbol,
-                    'Name': company_name, # Added Name Column
+                    'Name': company_name,
                     'Price': current_price,
                     'P/E': round(pe_ratio, 2),
                     'PEG': round(peg_ratio, 2),
@@ -185,7 +218,7 @@ with tab1:
                 if not matches.empty:
                     st.success(f"Found {len(matches)} stocks!")
                     
-                    # Display Table with Names
+                    # Display Table
                     st.dataframe(
                         matches.set_index('Symbol').style
                         .format({
