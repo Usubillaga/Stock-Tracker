@@ -4,6 +4,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import random
+import requests
+from io import StringIO
 
 # --- Page Config ---
 st.set_page_config(page_title="Random Market Scanner", layout="wide")
@@ -30,14 +32,20 @@ upside_threshold = st.sidebar.slider("Min Analyst Upside (%)", 0, 50, 5, 5)
 @st.cache_data(ttl=3600*24) # Cache the S&P 500 list for 24 hours
 def get_sp500_tickers():
     try:
-        # Pulls the table of S&P 500 companies from Wikipedia
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        tables = pd.read_html(url)
+        # Pretend to be a browser to avoid 403 Forbidden error
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        
+        response = requests.get(url, headers=headers)
+        
+        # Read the HTML content using StringIO
+        tables = pd.read_html(StringIO(response.text))
         df = tables[0]
+        
         return df['Symbol'].tolist()
     except Exception as e:
         st.error(f"Error fetching ticker list: {e}")
-        # Fallback list if Wikipedia fails
+        # Fallback list if Wikipedia fails completely
         return ["GOOGL", "AMZN", "MSFT", "AAPL", "NVDA", "TSLA", "META", "AMD", "PLTR", "SOFI", "INTC"]
 
 def fetch_fundamentals(ticker_list):
@@ -153,7 +161,8 @@ with tab1:
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Batch Size", len(df_fund))
                 m2.metric("Gems Found", len(matches))
-                m3.metric("Avg PEG (Batch)", f"{df_fund['PEG'].median():.2f}")
+                if not df_fund['PEG'].empty:
+                     m3.metric("Avg PEG (Batch)", f"{df_fund['PEG'].median():.2f}")
                 
                 if not matches.empty:
                     st.success(f"Found {len(matches)} Undervalued Growth stocks!")
@@ -205,3 +214,32 @@ with tab2:
             if latest['RSI'] < 30: st.success("✅ OVERSOLD - Potential Buy Signal")
             elif latest['RSI'] > 70: st.error("❌ OVERBOUGHT - Potential Sell Signal")
             else: st.info("Neutral Zone")
+
+# --- FOOTER: USER GUIDE ---
+st.markdown("---")
+with st.expander("📖 User Guide & Methodology (Click to Open)"):
+    st.markdown("""
+    ### **How to Use This Tracker**
+    
+    #### **1. Configure Your Strategy (Sidebar)**
+    * **Batch Size:** Choose how many stocks (10-100) to pull randomly from the S&P 500.
+    * **Max PEG Ratio:** The most important filter. A PEG < 1.0 implies the stock is undervalued relative to its growth rate.
+    * **Min Analyst Upside:** Filters stocks where the Wall St. consensus target is higher than the current price.
+
+    #### **2. Scan for Value (Tab 1)**
+    * Click **Shuffle & Scan New Batch**.
+    * Look for rows highlighted in Green. These are your candidates.
+    * *Note:* If the list is empty, try increasing the PEG threshold (e.g., to 1.5).
+
+    #### **3. Check the Charts (Tab 2)**
+    * Select a stock from the dropdown.
+    * **RSI Indicator:**
+        * **< 30 (Green Line):** Oversold. Price may be due for a bounce. (Potential Buy)
+        * **> 70 (Red Line):** Overbought. Price may be due for a drop. (Wait)
+    * **Trend (SMA 50):** * If the candles are **above** the Orange Line, the trend is UP.
+    
+    #### **Methodology**
+    * **Data Source:** Yahoo Finance (Real-time delayed).
+    * **RSI Formula:** 14-period Relative Strength Index.
+    * **Upside:** Calculated as `(Analyst Target - Current Price) / Current Price`.
+    """)
