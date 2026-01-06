@@ -166,8 +166,19 @@ with tab1:
                 
                 if not matches.empty:
                     st.success(f"Found {len(matches)} Undervalued Growth stocks!")
+                    
+                    # --- FIXED: Specific Column Formatting ---
+                    # We format specific columns to avoid errors with the 'Sector' text column
                     st.dataframe(
-                        matches.set_index('Symbol').style.format("{:.2f}").background_gradient(subset=['Upside (%)'], cmap='Greens'),
+                        matches.set_index('Symbol').style
+                        .format({
+                            'Price': "{:.2f}", 
+                            'P/E': "{:.2f}", 
+                            'PEG': "{:.2f}", 
+                            'Growth (%)': "{:.2f}", 
+                            'Upside (%)': "{:.2f}"
+                        })
+                        .background_gradient(subset=['Upside (%)'], cmap='Greens'),
                         use_container_width=True
                     )
                     
