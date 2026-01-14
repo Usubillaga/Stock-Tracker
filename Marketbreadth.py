@@ -159,28 +159,45 @@ def analyze_asset(asset_name, ticker, macro_penalty=0):
 
 def get_macro_environment():
     """Analyzes the 'Weather' of the market to set penalties."""
-    # Fetch Yields
-    ten_yr = yf.download(MACRO_ASSETS['10Y Yield'], period="5d", progress=False)['Close'].iloc[-1]
-    five_yr = yf.download(MACRO_ASSETS['5Y Yield'], period="5d", progress=False)['Close'].iloc[-1]
-    vix = yf.download(MACRO_ASSETS['Volatility (VIX)'], period="5d", progress=False)['Close'].iloc[-1]
-    
-    penalty = 0
-    status = []
-    
-    # 1. Yield Curve Check
-    if five_yr > ten_yr:
-        penalty += 15
-        status.append("Yield Curve Inverted (Recession Risk)")
-    
-    # 2. Fear Check
-    if vix > 30:
-        penalty += 15
-        status.append(f"High Volatility (VIX: {vix:.0f})")
-    elif vix > 20:
-        penalty += 5
-        status.append(f"Elevated Volatility (VIX: {vix:.0f})")
+    try:
+        # Fetch Data
+        # We wrap in float() to ensure we have a simple number, not a data Series
+        ten_yr_data = yf.download(MACRO_ASSETS['10Y Yield'], period="5d", progress=False)['Close']
+        five_yr_data = yf.download(MACRO_ASSETS['5Y Yield'], period="5d", progress=False)['Close']
+        vix_data = yf.download(MACRO_ASSETS['Volatility (VIX)'], period="5d", progress=False)['Close']
         
-    return penalty, status
+        # Check if data is empty to prevent crashes
+        if ten_yr_data.empty or five_yr_data.empty or vix_data.empty:
+            return 0, ["⚠️ insufficient macro data"]
+
+        # Extract the very last value as a pure Python float
+        # .iloc[-1] gets the last row. float() converts it to a raw number.
+        ten_yr = float(ten_yr_data.iloc[-1])
+        five_yr = float(five_yr_data.iloc[-1])
+        vix = float(vix_data.iloc[-1])
+        
+        penalty = 0
+        status = []
+        
+        # 1. Yield Curve Check
+        if five_yr > ten_yr:
+            penalty += 15
+            status.append(f"Yield Curve Inverted (Recession Risk) [5Y: {five_yr:.2f}% > 10Y: {ten_yr:.2f}%]")
+        
+        # 2. Fear Check
+        if vix > 30:
+            penalty += 15
+            status.append(f"High Volatility (VIX: {vix:.0f})")
+        elif vix > 20:
+            penalty += 5
+            status.append(f"Elevated Volatility (VIX: {vix:.0f})")
+            
+        return penalty, status
+
+    except Exception as e:
+        # Fallback in case of API errors
+        print(f"Macro Error: {e}")
+        return 0, [f"⚠️ Macro Data Unavailable: {e}"]
 
 # --- Main Logic ---
 
