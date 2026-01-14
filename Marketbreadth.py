@@ -1,287 +1,253 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # --- Page Configuration ---
-st.set_page_config(page_title="Global Macro & Signal Engine", layout="wide", page_icon="🌍")
+st.set_page_config(page_title="Pro Market Analyst", layout="wide", page_icon="🧠")
 
-st.title("🌍 Global Macro & Investment Signal Engine")
+st.title("🧠 Pro Market Analyst & Signal Engine")
 st.markdown("""
-**One Dashboard to Rule Them All.** * **Tab 1:** AI Decision Signals (Buy/Sell indicators for your core assets).
-* **Tabs 2-6:** Deep Macro Data (Sectors, Yields, Debt, Indicators, Indexes).
+**Advanced Multi-Factor Analysis.** This engine combines **Technical Trend** (SMA), **Momentum** (RSI/MACD), and **Macro Risks** (Yield Curve/VIX) to generate a weighted investment score.
 """)
 
-# --- Sidebar Settings ---
-st.sidebar.header("⚙️ Settings")
-days_lookback = st.sidebar.slider("Lookback Period (Days)", min_value=180, max_value=365*5, value=730)
+# --- Sidebar ---
+st.sidebar.header("⚙️ Configuration")
+days_lookback = st.sidebar.slider("Lookback Period (Days)", 365, 365*5, 730)
 start_date = datetime.now() - timedelta(days=days_lookback)
 
 st.sidebar.markdown("---")
-st.sidebar.info("**Core Assets for Decision:**\n\n* 🏠 Real Estate (VNQ)\n* 🏛 Bonds (TLT)\n* 🪙 Bitcoin (BTC)\n* 🧈 Gold (GLD)\n* 📈 Stocks (SPY)")
+st.sidebar.info("""
+**Scoring Logic (0 to 100):**
+* **0-40:** Bearish (Sell/Avoid)
+* **40-60:** Neutral (Watch)
+* **60-100:** Bullish (Accumulate)
 
-# --- Data Dictionaries ---
+**Macro Penalty:**
+Scores are penalized if the Yield Curve is inverted or Volatility (VIX) is high.
+""")
 
-# 1. CORE ASSETS (For Decision Making)
+# --- Assets ---
 DECISION_ASSETS = {
-    'Equities (S&P 500)': 'SPY',
-    'Bonds (20Y Treasury)': 'TLT',
-    'Gold': 'GLD',
-    'Real Estate (Immobilien)': 'VNQ',
-    'Bitcoin': 'BTC-USD'
+    '🇺🇸 Equities (S&P 500)': 'SPY',
+    '🌍 Dev. Markets (EAFE)': 'EFA',
+    '🏛 Bonds (20Y Treasury)': 'TLT',
+    '🧈 Gold': 'GLD',
+    '🏠 Real Estate': 'VNQ',
+    '₿ Bitcoin': 'BTC-USD'
 }
 
-# 2. SECTORS
-SECTORS = {
-    'Technology': 'XLK', 'Financials': 'XLF', 'Healthcare': 'XLV',
-    'Energy': 'XLE', 'Consumer Disc.': 'XLY', 'Consumer Staples': 'XLP',
-    'Utilities': 'XLU', 'Materials': 'XLB', 'Industrials': 'XLI',
-    'Real Estate': 'XLRE', 'Comm. Services': 'XLC'
+MACRO_ASSETS = {
+    '10Y Yield': '^TNX',
+    '5Y Yield': '^FVX',
+    'Volatility (VIX)': '^VIX'
 }
 
-# 3. YIELDS
-YIELDS = {
-    '13 Week': '^IRX', '5 Year': '^FVX', '10 Year': '^TNX', '30 Year': '^TYX'
-}
-
-# 4. DEBT PROXIES
-DEBT_PROXIES = {
-    'US Treasury Bond ETF': 'GOVT',
-    'Intl Treasury Bond ETF': 'BWX',
-    'Emerging Markets Debt': 'EMB',
-    'High Yield Corporate': 'HYG'
-}
-
-# 5. LEADING INDICATORS
-LEADING_INDICATORS = {
-    'Copper (Economy)': 'HG=F',
-    'Gold (Fear)': 'GC=F',
-    'Semiconductors (Tech)': 'SMH',
-    'Homebuilders (Early Cycle)': 'XHB'
-}
-
-# 6. GLOBAL INDEXES
-INDEXES = {
-    'S&P 500 (USA)': '^GSPC', 'Nasdaq 100 (USA)': '^NDX', 
-    'DAX (Germany)': '^GDAXI', 'FTSE 100 (UK)': '^FTSE', 
-    'Nikkei 225 (Japan)': '^N225', 'Shanghai Comp (China)': '000001.SS'
-}
-
-# --- Helper Functions ---
+# --- Advanced Calculation Functions ---
 
 @st.cache_data
-def fetch_data(tickers_dict, start_date):
-    """Fetches historical closing prices for a dictionary of tickers."""
-    tickers_list = list(tickers_dict.values())
-    if not tickers_list: return pd.DataFrame()
+def fetch_data(ticker):
+    """Fetches data and calculates advanced indicators."""
     try:
-        data = yf.download(tickers_list, start=start_date, progress=False)['Close']
-        # Handle single ticker result vs multiple
-        if isinstance(data, pd.Series):
-            data = data.to_frame()
-            data.columns = tickers_list
-            
-        reverse_map = {v: k for k, v in tickers_dict.items()}
-        data.rename(columns=reverse_map, inplace=True)
-        return data
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return pd.DataFrame()
-
-@st.cache_data
-def calculate_technical_signals(ticker_symbol, asset_name):
-    """Calculates SMA Golden Cross / Death Cross signals."""
-    try:
-        df = yf.download(ticker_symbol, period="2y", progress=False)
+        # Fetch extra buffer for calculations
+        df = yf.download(ticker, start=start_date - timedelta(days=100), progress=False)
         if df.empty: return None
         
-        # Calculate Indicators
+        # Ensure we are working with 1D series (Close)
+        df = df['Close'].to_frame() if isinstance(df['Close'], pd.Series) else df[['Close']]
+        df.columns = ['Close']
+        
+        # 1. SMAs
         df['SMA_50'] = df['Close'].rolling(window=50).mean()
         df['SMA_200'] = df['Close'].rolling(window=200).mean()
         
-        latest = df.iloc[-1]
-        price = latest['Close']
-        sma50 = latest['SMA_50']
-        sma200 = latest['SMA_200']
+        # 2. RSI (Relative Strength Index)
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
         
-        # Logic
-        if price > sma50 and price > sma200:
-            trend = "Strong Uptrend 🟢"
-            action = "BUY / ACCUMULATE"
-            score = 2
-        elif price < sma50 and price < sma200:
-            trend = "Downtrend 🔴"
-            action = "SELL / AVOID"
-            score = -2
-        elif price < sma50 and price > sma200:
-            trend = "Pullback (Watch) 🟠"
-            action = "HOLD / WATCH"
-            score = 0
-        elif price > sma50 and price < sma200:
-            trend = "Recovery Attempt 🟡"
-            action = "SPECULATIVE BUY"
-            score = 1
-        else:
-            trend = "Neutral ⚪"
-            action = "WAIT"
-            score = 0
-            
-        return {
-            "Asset": asset_name,
-            "Price": f"{price:,.2f}",
-            "Trend": trend,
-            "Signal": action,
-            "SMA 50": f"{sma50:,.2f}",
-            "SMA 200": f"{sma200:,.2f}",
-            "_score": score
-        }
+        # 3. MACD
+        exp12 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp26 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp12 - exp26
+        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        
+        # 4. Drawdown
+        rolling_max = df['Close'].cummax()
+        df['Drawdown'] = (df['Close'] - rolling_max) / rolling_max
+        
+        return df
     except Exception as e:
         return None
 
-@st.cache_data
-def fetch_current_yields():
-    """Fetches latest yields for the curve plot."""
-    tickers = list(YIELDS.values())
-    try:
-        data = yf.download(tickers, period="5d", progress=False)['Close']
-        latest = data.iloc[-1]
-        reverse_map = {v: k for k, v in YIELDS.items()}
-        latest = latest.rename(index=reverse_map)
-        order = ['13 Week', '5 Year', '10 Year', '30 Year']
-        return latest.reindex(order)
-    except:
-        return pd.Series()
-
-# --- Main Layout ---
-
-# Define the tabs
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🚦 Signals (Decision)", 
-    "📈 Market Sectors", 
-    "💸 Yield Curves", 
-    "🏛️ Debt & Bonds", 
-    "🔮 Leading Indicators", 
-    "🌍 Global Indexes"
-])
-
-# --- TAB 1: DECISION SIGNALS ---
-with tab1:
-    st.header("🤖 AI Technical Analysis (Buy/Sell Logic)")
-    st.caption("Based on SMA 50/200 Crossovers. 'Green' signals imply strong momentum.")
+def analyze_asset(asset_name, ticker, macro_penalty=0):
+    """
+    Generates a score (0-100) based on weighted factors.
+    """
+    df = fetch_data(ticker)
+    if df is None: return None
     
-    # Calculate Signals
-    results = []
-    progress_bar = st.progress(0)
-    for i, (asset_name, ticker) in enumerate(DECISION_ASSETS.items()):
-        res = calculate_technical_signals(ticker, asset_name)
-        if res: results.append(res)
-        progress_bar.progress((i + 1) / len(DECISION_ASSETS))
-    progress_bar.empty()
-
-    # Display Table
-    if results:
-        sig_df = pd.DataFrame(results)
-        sig_df.set_index('Asset', inplace=True)
-        sig_df = sig_df.sort_values(by="_score", ascending=False)
+    current = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    score = 50 # Start Neutral
+    reasons = []
+    
+    # --- Factor 1: Trend (Weight: 40%) ---
+    if current['Close'] > current['SMA_200']:
+        score += 20
+        reasons.append("Price > 200 SMA (Long Term Bullish)")
+    else:
+        score -= 20
+        reasons.append("Price < 200 SMA (Long Term Bearish)")
         
-        # Coloring function
-        def color_signal(val):
-            color = ''
-            if 'BUY' in val: color = 'background-color: #d4edda; color: green' # Green
-            elif 'SELL' in val: color = 'background-color: #f8d7da; color: red' # Red
-            elif 'WATCH' in val or 'HOLD' in val: color = 'background-color: #fff3cd; color: #856404' # Yellow
-            return color
-
-        display_cols = ['Price', 'Trend', 'Signal', 'SMA 50', 'SMA 200']
-        st.dataframe(sig_df[display_cols].style.applymap(color_signal, subset=['Signal']), use_container_width=True)
+    if current['Close'] > current['SMA_50']:
+        score += 10
+        if current['SMA_50'] > current['SMA_200']:
+            reasons.append("Golden Cross Active")
+    else:
+        score -= 10
     
-    # Charting the Decision Assets
-    st.subheader("Performance of Decision Assets")
-    decision_data = fetch_data(DECISION_ASSETS, start_date)
-    if not decision_data.empty:
-        norm_decision = decision_data / decision_data.iloc[0] * 100
-        fig_dec = px.line(norm_decision, title="Relative Performance (Rebased to 100)")
-        st.plotly_chart(fig_dec, use_container_width=True)
-
-# --- TAB 2: SECTORS ---
-with tab2:
-    st.subheader("Sector Rotation")
-    st.write("Compare defensive sectors (Utilities, Staples) vs Growth (Tech, Discretionary).")
-    sector_data = fetch_data(SECTORS, start_date)
-    if not sector_data.empty:
-        norm_sectors = sector_data / sector_data.iloc[0] * 100
-        fig_sec = px.line(norm_sectors, title="US Sector Performance (Normalized)")
-        st.plotly_chart(fig_sec, use_container_width=True)
-
-# --- TAB 3: YIELDS ---
-with tab3:
-    col_y1, col_y2 = st.columns(2)
-    with col_y1:
-        st.subheader("Yield Curve Shape")
-        curr_yields = fetch_current_yields()
-        if not curr_yields.empty:
-            fig_curve = px.line(x=curr_yields.index, y=curr_yields.values, markers=True, 
-                                labels={'x':'Maturity','y':'Yield %'}, title="Current US Treasury Curve")
-            st.plotly_chart(fig_curve, use_container_width=True)
-            # Inversion warning
-            slope = curr_yields.get('10 Year', 0) - curr_yields.get('5 Year', 0)
-            if slope < 0:
-                st.error(f"⚠️ Curve Inverted (10Y-5Y): {slope:.2f}%. Recession signal.")
-            else:
-                st.success(f"✅ Normal Curve (10Y-5Y): +{slope:.2f}%.")
-
-    with col_y2:
-        st.subheader("10-Year Yield History")
-        ten_y = fetch_data({'10 Year': '^TNX'}, start_date)
-        if not ten_y.empty:
-            st.plotly_chart(px.area(ten_y, title="10-Year Treasury Yield Trend"), use_container_width=True)
-
-# --- TAB 4: DEBT ---
-with tab4:
-    st.subheader("Sovereign Debt Health (via Bond ETFs)")
-    st.caption("Lower ETF prices = Higher Yields = Higher Cost of Debt for Govts.")
-    debt_data = fetch_data(DEBT_PROXIES, start_date)
-    if not debt_data.empty:
-        norm_debt = debt_data / debt_data.iloc[0] * 100
-        st.plotly_chart(px.line(norm_debt, title="Bond Market Performance"), use_container_width=True)
+    # --- Factor 2: Momentum (RSI) (Weight: 20%) ---
+    rsi = current['RSI']
+    if rsi < 30:
+        score += 10
+        reasons.append("RSI Oversold (Value Buy?)")
+    elif rsi > 70:
+        score -= 10
+        reasons.append("RSI Overbought (Risk)")
+    else:
+        reasons.append(f"RSI Neutral ({rsi:.0f})")
+        
+    # --- Factor 3: MACD (Weight: 20%) ---
+    if current['MACD'] > current['Signal_Line']:
+        score += 10
+        reasons.append("MACD Bullish Crossover")
+    else:
+        score -= 10
     
-    st.markdown("### 📊 Debt-to-GDP Context (Approx Static Data)")
-    debt_static = pd.DataFrame({
-        'Country': ['Japan', 'Italy', 'USA', 'France', 'UK', 'China', 'Germany'],
-        'Debt/GDP (%)': [263, 144, 123, 110, 104, 83, 66]
-    }).sort_values('Debt/GDP (%)', ascending=False)
-    st.plotly_chart(px.bar(debt_static, x='Country', y='Debt/GDP (%)', color='Debt/GDP (%)'), use_container_width=True)
-
-# --- TAB 5: LEADING INDICATORS ---
-with tab5:
-    st.subheader("Economic Crystal Ball")
-    raw_leads = fetch_data(LEADING_INDICATORS, start_date)
+    # --- Factor 4: Macro Penalty (Weight: 20%) ---
+    # We subtract the macro penalty passed from the main loop
+    if macro_penalty > 0:
+        score -= macro_penalty
+        reasons.append(f"⚠️ Macro Headwind (-{macro_penalty} pts)")
     
-    if not raw_leads.empty:
-        col_l1, col_l2 = st.columns(2)
-        with col_l1:
-            st.write("**Dr. Copper vs Gold**")
-            # Creating Ratio
-            if 'Copper (Economy)' in raw_leads.columns and 'Gold (Fear)' in raw_leads.columns:
-                raw_leads['Copper/Gold'] = raw_leads['Copper (Economy)'] / raw_leads['Gold (Fear)']
-                st.plotly_chart(px.line(raw_leads['Copper/Gold'], title="Copper/Gold Ratio (Rising = Growth)"), use_container_width=True)
-        with col_l2:
-            st.write("**Tech vs Staples (Risk On/Off)**")
-            risk_data = fetch_data({'Semis': 'SMH', 'Staples': 'XLP'}, start_date)
-            if not risk_data.empty:
-                risk_data['Ratio'] = risk_data['Semis'] / risk_data['Staples']
-                st.plotly_chart(px.line(risk_data['Ratio'], title="Semis/Staples Ratio (Rising = Risk On)"), use_container_width=True)
+    # Cap score
+    score = max(0, min(100, score))
+    
+    # Determine Verdict
+    if score >= 75: verdict = "STRONG BUY 🚀"
+    elif score >= 60: verdict = "BUY / ACCUMULATE 🟢"
+    elif score >= 40: verdict = "HOLD / NEUTRAL 🟡"
+    elif score >= 25: verdict = "SELL / REDUCE 🔴"
+    else: verdict = "STRONG SELL 📉"
 
-# --- TAB 6: GLOBAL INDEXES ---
-with tab6:
-    st.subheader("Global Equity Markets")
-    idx_data = fetch_data(INDEXES, start_date)
-    if not idx_data.empty:
-        norm_idx = idx_data / idx_data.iloc[0] * 100
-        st.plotly_chart(px.line(norm_idx, title="Global Indexes (Normalized)"), use_container_width=True)
+    return {
+        "Asset": asset_name,
+        "Price": current['Close'],
+        "Score": score,
+        "Verdict": verdict,
+        "Drawdown": f"{current['Drawdown']*100:.2f}%",
+        "RSI": f"{rsi:.1f}",
+        "Details": "; ".join(reasons)
+    }
 
-# --- Footer ---
-st.sidebar.markdown("---")
-st.sidebar.caption("Data source: Yahoo Finance. 'Signals' are based on Simple Moving Averages and should not be taken as financial advice.")
+def get_macro_environment():
+    """Analyzes the 'Weather' of the market to set penalties."""
+    # Fetch Yields
+    ten_yr = yf.download(MACRO_ASSETS['10Y Yield'], period="5d", progress=False)['Close'].iloc[-1]
+    five_yr = yf.download(MACRO_ASSETS['5Y Yield'], period="5d", progress=False)['Close'].iloc[-1]
+    vix = yf.download(MACRO_ASSETS['Volatility (VIX)'], period="5d", progress=False)['Close'].iloc[-1]
+    
+    penalty = 0
+    status = []
+    
+    # 1. Yield Curve Check
+    if five_yr > ten_yr:
+        penalty += 15
+        status.append("Yield Curve Inverted (Recession Risk)")
+    
+    # 2. Fear Check
+    if vix > 30:
+        penalty += 15
+        status.append(f"High Volatility (VIX: {vix:.0f})")
+    elif vix > 20:
+        penalty += 5
+        status.append(f"Elevated Volatility (VIX: {vix:.0f})")
+        
+    return penalty, status
+
+# --- Main Logic ---
+
+# 1. Get Macro Weather Report
+st.subheader("🌩️ Macro Environment Check")
+macro_penalty, macro_status = get_macro_environment()
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Macro Penalty Score", f"-{macro_penalty}", help="Points deducted from assets due to macro risk.")
+col2.write("**Risk Factors Detected:**")
+if macro_status:
+    for s in macro_status: col2.error(s)
+else:
+    col2.success("No major macro alarms detected (Curve Normal, VIX Stable).")
+
+st.markdown("---")
+
+# 2. Asset Analysis
+st.subheader("📋 Asset Allocation Matrix")
+
+results = []
+progress = st.progress(0)
+
+for i, (name, ticker) in enumerate(DECISION_ASSETS.items()):
+    # Assets like Bonds/Gold might act as hedges, so we reduce macro penalty for them
+    local_penalty = macro_penalty
+    if "Bonds" in name or "Gold" in name:
+        local_penalty = 0 # Safe havens don't get penalized for fear
+        
+    res = analyze_asset(name, ticker, local_penalty)
+    if res: results.append(res)
+    progress.progress((i+1)/len(DECISION_ASSETS))
+
+progress.empty()
+
+# 3. Display Results
+if results:
+    df_res = pd.DataFrame(results)
+    
+    # Visual Styling
+    def color_verdict(val):
+        color = 'white'
+        if 'STRONG BUY' in val: color = '#28a745' # Dark Green
+        elif 'ACCUMULATE' in val: color = '#90ee90' # Light Green
+        elif 'NEUTRAL' in val: color = '#ffc107' # Yellow
+        elif 'SELL' in val: color = '#dc3545' # Red
+        return f'background-color: {color}; color: black; font-weight: bold'
+
+    # Show Main Table
+    st.dataframe(
+        df_res[['Asset', 'Price', 'Score', 'Verdict', 'Drawdown', 'RSI']].style.applymap(color_verdict, subset=['Verdict']),
+        use_container_width=True,
+        height=300
+    )
+    
+    # Show Details Expander
+    with st.expander("🔎 Click for Deep Dive Analysis (Why this score?)"):
+        for index, row in df_res.iterrows():
+            st.markdown(f"**{row['Asset']} (Score: {row['Score']})**")
+            st.caption(f"Analysis: {row['Details']}")
+            st.markdown("---")
+
+# 4. Charting
+st.subheader("📉 Relative Performance Chart")
+df_hist = yf.download(list(DECISION_ASSETS.values()), start=start_date, progress=False)['Close']
+df_hist.columns = list(DECISION_ASSETS.keys())
+df_norm = df_hist / df_hist.iloc[0] * 100
+st.plotly_chart(px.line(df_norm), use_container_width=True)
+
+st.sidebar.info("Disclaimer: This tool aggregates technical indicators (RSI, MACD, SMA) and macro data (Yields, VIX). Financial markets are probabilistic, not deterministic. Always do your own research.")
