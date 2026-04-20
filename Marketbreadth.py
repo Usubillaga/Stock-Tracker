@@ -80,46 +80,82 @@ RECESSION_PROXIES = {
 
 # --- 4. Core Calculation Engines ---
 
-@st.cache_data
-def fetch_history(tickers_dict, start_date):
-    """Robust data fetcher."""
-    tickers = list(tickers_dict.values())
+@st.cache_data(ttl=3600)
+def safe_download_close(tickers, start=None, period=None):
+    """
+    BULLETPROOF YFINANCE FETCHER:
+    Handles MultiIndex changes, single vs multiple tickers, and holiday NaN values.
+    """
     try:
-        data = yf.download(tickers, start=start_date, progress=False)['Close']
-        if isinstance(data, pd.Series):
-            data = data.to_frame()
-            data.columns = tickers
-        rev_map = {v: k for k, v in tickers_dict.items()}
-        data.rename(columns=rev_map, inplace=True)
-        return data
+        if start:
+            raw = yf.download(tickers, start=start, progress=False)
+        else:
+            raw = yf.download(tickers, period=period, progress=False)
+
+        if raw.empty: return pd.DataFrame()
+
+        # Safely extract 'Close' regardless of yfinance version
+        if isinstance(raw.columns, pd.MultiIndex):
+            if 'Close' in raw.columns.levels[0]:
+                df = raw['Close']
+            elif 'Close' in raw.columns.levels[1]:
+                df = raw.xs('Close', level=1, axis=1)
+            else:
+                df = raw
+        else:
+            df = raw[['Close']] if 'Close' in raw else raw
+
+        # Forward-fill to fix misaligned holiday schedules (e.g., Bond market closed but Stocks open)
+        df = df.ffill().bfill()
+        
+        # Ensure output is always a DataFrame, even for a single ticker
+        if isinstance(df, pd.Series):
+            df = df.to_frame()
+            if isinstance(tickers, str):
+                df.columns = [tickers]
+            elif isinstance(tickers, list) and len(tickers) == 1:
+                df.columns = [tickers[0]]
+                
+        return df
     except Exception as e:
+        st.error(f"Data Fetch Error: {e}")
         return pd.DataFrame()
+
+def fetch_history(tickers_dict, start_date):
+    """Robust data fetcher wrapper."""
+    tickers = list(tickers_dict.values())
+    data = safe_download_close(tickers, start=start_date)
+    
+    if not data.empty:
+        # Only rename columns that were successfully downloaded
+        rev_map = {v: k for k, v in tickers_dict.items() if v in data.columns}
+        data.rename(columns=rev_map, inplace=True)
+    return data
 
 def determine_economic_regime_detailed():
     """
     Detailed calculation of the Macro Regime.
-    Returns the specific contribution of each asset to the score.
     """
     try:
         tickers = list(REGIME_INDICATORS.values())
-        # We need 1 year of data to calculate the 6-month (126 day) ROC smoothing
-        df = yf.download(tickers, period="1y", progress=False)['Close']
+        df = safe_download_close(tickers, period="1y")
+        
+        if df.empty: return None
         
         # Calculate 6-month Rate of Change (ROC)
-        # This filters out short-term noise and captures the 'Cycle' trend
         roc = df.pct_change(126).iloc[-1]
         
         # 1. Growth Component (50% US Equities, 50% Global Copper)
-        g_equity_contrib = roc[REGIME_INDICATORS['Growth_Equity']]
-        g_metal_contrib = roc[REGIME_INDICATORS['Growth_Industrial']]
+        g_equity_contrib = roc.get(REGIME_INDICATORS['Growth_Equity'], 0)
+        g_metal_contrib = roc.get(REGIME_INDICATORS['Growth_Industrial'], 0)
         growth_score = (g_equity_contrib + g_metal_contrib) / 2
         
         # 2. Inflation Component (50% Oil Cost, 50% Bond Yields)
-        i_energy_contrib = roc[REGIME_INDICATORS['Inflation_Energy']]
-        i_yield_contrib = roc[REGIME_INDICATORS['Inflation_Rates']]
+        i_energy_contrib = roc.get(REGIME_INDICATORS['Inflation_Energy'], 0)
+        i_yield_contrib = roc.get(REGIME_INDICATORS['Inflation_Rates'], 0)
         inflation_score = (i_energy_contrib + i_yield_contrib) / 2
         
-        # 3. Regime Identification & Deep Interpretation
+        # 3. Regime Identification
         if growth_score > 0 and inflation_score > 0:
             regime = "REFLATIONARY BOOM (Inflationary Growth) 🔥"
             desc = """
@@ -165,16 +201,15 @@ def determine_economic_regime_detailed():
         return None
 
 def analyze_recession_risk_detailed():
-    """
-    Detailed Recession Risk using Dow Theory and Labor Leading Indicators.
-    """
+    """Detailed Recession Risk using Dow Theory and Labor Leading Indicators."""
     try:
-        # Fetch Data
         proxies = list(RECESSION_PROXIES.values())
         yields = ['^TNX', '^FVX'] 
         all_tickers = proxies + yields
         
-        df = yf.download(all_tickers, period="2y", progress=False)['Close']
+        df = safe_download_close(all_tickers, period="2y")
+        if df.empty: return "Data Error", 0, ["Could not fetch data"], None
+        
         current = df.iloc[-1]
         ma200 = df.rolling(200).mean().iloc[-1]
         
@@ -182,35 +217,31 @@ def analyze_recession_risk_detailed():
         score = 0
         
         # A. Yield Curve (Banking Stress)
-        curve_val = current['^TNX'] - current['^FVX']
+        curve_val = current.get('^TNX', 0) - current.get('^FVX', 0)
         if curve_val < 0:
             score += 35
             risks.append(f"**Banking Credit Stress:** Yield Curve Inverted ({curve_val:.2f}%). Banks reduce lending.")
             
         # B. Labor Market (Leading Indicators)
-        # RHI (Staffing) leads Non-Farm Payrolls by ~3-6 months.
-        rhi_trend = "Bearish" if current[RECESSION_PROXIES['Labor_Staffing']] < ma200[RECESSION_PROXIES['Labor_Staffing']] else "Bullish"
+        rhi_trend = "Bearish" if current.get(RECESSION_PROXIES['Labor_Staffing'], 0) < ma200.get(RECESSION_PROXIES['Labor_Staffing'], 0) else "Bullish"
         if rhi_trend == "Bearish":
             score += 25
             risks.append(f"**Labor Weakness:** Staffing stocks (RHI) are in a downtrend. Temporary hiring is slowing.")
             
         # C. GDP / Dow Theory
-        # IYT (Transports) must confirm IWM (Small Caps)
-        iyt_trend = "Bearish" if current[RECESSION_PROXIES['GDP_Transports']] < ma200[RECESSION_PROXIES['GDP_Transports']] else "Bullish"
+        iyt_trend = "Bearish" if current.get(RECESSION_PROXIES['GDP_Transports'], 0) < ma200.get(RECESSION_PROXIES['GDP_Transports'], 0) else "Bullish"
         if iyt_trend == "Bearish":
             score += 25
             risks.append(f"**Physical GDP Contraction:** Transport stocks (IYT) are in a downtrend. Goods volume is dropping.")
             
         # D. Consumer Strength
-        # Discretionary (XLY) vs Staples (XLP)
-        ratio_curr = current[RECESSION_PROXIES['Cons_Discretionary']] / current[RECESSION_PROXIES['Cons_Staples']]
+        ratio_curr = current.get(RECESSION_PROXIES['Cons_Discretionary'], 1) / current.get(RECESSION_PROXIES['Cons_Staples'], 1)
         ratio_ma = (df[RECESSION_PROXIES['Cons_Discretionary']] / df[RECESSION_PROXIES['Cons_Staples']]).rolling(50).mean().iloc[-1]
         
         if ratio_curr < ratio_ma:
             score += 15
             risks.append("**Consumer Fear:** Defensive Staples (XLP) are outperforming Discretionary (XLY).")
             
-        # Risk Interpretation
         if score >= 65: level = "HIGH RECESSION RISK (Defensive Positioning Required) 🚨"
         elif score >= 35: level = "ELEVATED RISK (Caution) ⚠️"
         else: level = "LOW RISK (Expansionary) ✅"
@@ -221,16 +252,14 @@ def analyze_recession_risk_detailed():
         return "Error", 0, [str(e)], None
 
 def analyze_asset_technical(ticker, asset_name):
-    """
-    Standard Technical Scoring.
-    """
+    """Standard Technical Scoring."""
     try:
-        df = yf.download(ticker, start=start_date - timedelta(days=300), progress=False)
+        df = safe_download_close([ticker], start=start_date - timedelta(days=300))
         if df.empty: return None
-        close = df['Close']
-        if isinstance(close, pd.DataFrame): close = close.iloc[:, 0]
         
-        # Metrics
+        # It's a dataframe with 1 column, extract it as a Series
+        close = df.iloc[:, 0]
+        
         sma50 = close.rolling(50).mean()
         sma200 = close.rolling(200).mean()
         
@@ -246,7 +275,6 @@ def analyze_asset_technical(ticker, asset_name):
         macd = exp12 - exp26
         signal = macd.ewm(span=9, adjust=False).mean()
         
-        # Current Values (Scalar)
         cur = float(close.iloc[-1])
         s200 = float(sma200.iloc[-1])
         r_val = float(rsi.iloc[-1])
@@ -256,15 +284,12 @@ def analyze_asset_technical(ticker, asset_name):
         score = 50
         reasons = []
         
-        # Trend
         if cur > s200: score += 20; reasons.append("Bull Trend (>200SMA)")
         else: score -= 20; reasons.append("Bear Trend (<200SMA)")
         
-        # Momentum
         if r_val < 30: score += 10; reasons.append("Oversold (RSI<30)")
         elif r_val > 70: score -= 10; reasons.append("Overbought (RSI>70)")
         
-        # Momentum 2
         if m_val > s_val: score += 10; reasons.append("MACD Bullish")
         else: score -= 10
         
@@ -289,7 +314,8 @@ with tab1:
     st.header("🚨 US Recession Risk Monitor")
     st.caption("This module triangulates recession risk using **Financial Data** (Yield Curve), **Labor Data** (Staffing Stocks), and **Physical GDP** (Transports).")
     
-    risk_level, risk_score, risk_details, risk_df = analyze_recession_risk_detailed()
+    with st.spinner("Calculating Recession Risk..."):
+        risk_level, risk_score, risk_details, risk_df = analyze_recession_risk_detailed()
     
     col1, col2 = st.columns([1, 2])
     
@@ -307,29 +333,28 @@ with tab1:
             st.success("No structural economic warnings detected.")
 
     with col2:
-        if risk_df is not None:
-            # Normalize Data for comparison
+        if risk_df is not None and not risk_df.empty:
             norm_risk = risk_df / risk_df.iloc[0] * 100
             st.subheader("Real-Time Economic Proxies")
             st.write("Visualizing the health of **Physical GDP (IYT)** vs **Labor Demand (RHI)**.")
             
-            plot_cols = [RECESSION_PROXIES['Labor_Staffing'], RECESSION_PROXIES['GDP_Transports'], RECESSION_PROXIES['GDP_SmallCaps']]
-            st.plotly_chart(px.line(norm_risk[plot_cols], title="Labor & Transport Trends (Normalized)"), use_container_width=True)
+            plot_cols = [c for c in [RECESSION_PROXIES['Labor_Staffing'], RECESSION_PROXIES['GDP_Transports'], RECESSION_PROXIES['GDP_SmallCaps']] if c in norm_risk.columns]
+            if plot_cols:
+                st.plotly_chart(px.line(norm_risk[plot_cols], title="Labor & Transport Trends (Normalized)"), use_container_width=True)
 
 # --- TAB 2: ECONOMIC REGIME (DETAILED) ---
 with tab2:
     st.header("🧭 Global Economic Regime (The 4 Quadrants)")
     
-    regime = determine_economic_regime_detailed()
+    with st.spinner("Determining Economic Quadrant..."):
+        regime = determine_economic_regime_detailed()
     
     if regime:
-        # Top Section: The Result
         st.info(f"### CURRENT REGIME: {regime['Regime']}")
         
         col_main, col_detail = st.columns([2, 1])
         
         with col_main:
-            # Quadrant Plot
             fig = go.Figure()
             fig.add_shape(type="rect", x0=0, y0=0, x1=50, y1=50, fillcolor="rgba(0,255,0,0.1)", line=dict(width=0))
             fig.add_shape(type="rect", x0=-50, y0=0, x1=0, y1=50, fillcolor="rgba(255,0,0,0.1)", line=dict(width=0))
@@ -362,22 +387,25 @@ with tab2:
 with tab3:
     st.header("🚦 Asset Signal Matrix")
     results = []
-    for i, (name, ticker) in enumerate(DECISION_ASSETS.items()):
-        res = analyze_asset_technical(ticker, name)
-        if res: results.append(res)
+    with st.spinner("Running Technical Analysis..."):
+        for i, (name, ticker) in enumerate(DECISION_ASSETS.items()):
+            res = analyze_asset_technical(ticker, name)
+            if res: results.append(res)
     
     if results:
         df_res = pd.DataFrame(results).sort_values("Score", ascending=False)
         def color_verdict(val):
             color = '#d4edda' if 'BUY' in val else ('#f8d7da' if 'SELL' in val else '#fff3cd')
             return f'background-color: {color}; color: black'
-        st.dataframe(df_res[['Asset', 'Price', 'Score', 'Verdict', 'RSI', 'Details']].style.applymap(color_verdict, subset=['Verdict']), use_container_width=True)
+        # Fixed future warning by using `map` instead of `applymap`
+        st.dataframe(df_res[['Asset', 'Price', 'Score', 'Verdict', 'RSI', 'Details']].style.map(color_verdict, subset=['Verdict']), use_container_width=True)
 
 # --- TAB 4: BREADTH ---
 with tab4:
     st.header("Internal Market Health")
-    breadth_df = fetch_history(BREADTH_ASSETS, start_date)
-    if not breadth_df.empty:
+    with st.spinner("Fetching Market Breadth..."):
+        breadth_df = fetch_history(BREADTH_ASSETS, start_date)
+    if not breadth_df.empty and 'S&P 500 (Equal Weighted)' in breadth_df and 'S&P 500 (Cap Weighted)' in breadth_df:
         breadth_df['Breadth Ratio'] = breadth_df['S&P 500 (Equal Weighted)'] / breadth_df['S&P 500 (Cap Weighted)']
         breadth_df['Breadth_MA'] = breadth_df['Breadth Ratio'].rolling(50).mean()
         curr_b = breadth_df['Breadth Ratio'].iloc[-1]; ma_b = breadth_df['Breadth_MA'].iloc[-1]
@@ -389,15 +417,19 @@ with tab4:
 with tab5:
     st.header("Commodities & Currency")
     macro_tickers = {'Oil (WTI)': 'CL=F', 'US Dollar (DXY)': 'DX-Y.NYB', 'Copper': 'HG=F', 'Gold': 'GC=F'}
-    macro_df = fetch_history(macro_tickers, start_date)
+    with st.spinner("Fetching Macro FX..."):
+        macro_df = fetch_history(macro_tickers, start_date)
     if not macro_df.empty:
         col1, col2 = st.columns(2)
-        with col1: st.plotly_chart(px.line(macro_df['Oil (WTI)'], title="Oil (Inflation Input)"), use_container_width=True)
-        with col2: st.plotly_chart(px.line(macro_df['US Dollar (DXY)'], title="US Dollar (Global Stress)"), use_container_width=True)
+        if 'Oil (WTI)' in macro_df:
+            with col1: st.plotly_chart(px.line(macro_df['Oil (WTI)'], title="Oil (Inflation Input)"), use_container_width=True)
+        if 'US Dollar (DXY)' in macro_df:
+            with col2: st.plotly_chart(px.line(macro_df['US Dollar (DXY)'], title="US Dollar (Global Stress)"), use_container_width=True)
 
 # --- TAB 6: SECTORS ---
 with tab6:
     st.header("Sector Rotation")
-    sec_df = fetch_history(SECTORS, start_date)
+    with st.spinner("Fetching Sectors..."):
+        sec_df = fetch_history(SECTORS, start_date)
     if not sec_df.empty:
         st.plotly_chart(px.line(sec_df / sec_df.iloc[0] * 100, title="Sector Performance (Normalized)"), use_container_width=True)
